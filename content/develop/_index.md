@@ -21,6 +21,13 @@ Get all the information you need to build beautiful, performant web apps with Ja
         href="/develop/api-reference"
     >Learn about our API with function definitions and examples.</InlineCallout>
 
+    <InlineCallout
+        color="yellow-80"
+        icon="auto_awesome"
+        bold="Tutorials."
+        href="/develop/tutorials"
+    >Follow step-by-step instructions to build example apps and useful snippets.</InlineCallout>
+
     {/*
 
     <InlineCallout

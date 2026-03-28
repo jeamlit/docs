@@ -935,20 +935,14 @@ site_menu:
     url: /develop/api-reference/cli/version
   - category: Develop / Tutorials
     url: /develop/tutorials
-    visible: false
-    ignore: true
   - category: Develop / Tutorials / Authentication and personalization
     url: /develop/tutorials/authentication
-    visible: false
-    ignore: true
   - category: Develop / Tutorials / Authentication and personalization / Google Auth Platform
     url: /develop/tutorials/authentication/google
     visible: false
     ignore: true
   - category: Develop / Tutorials / Authentication and personalization / Microsoft Entra
     url: /develop/tutorials/authentication/microsoft
-    visible: false
-    ignore: true
   - category: Develop / Tutorials / Chat and LLM apps
     url: /develop/tutorials/chat-and-llm-apps
     visible: false

@@ -1,7 +1,7 @@
 ---
 title: Tutorials
 slug: /develop/tutorials
-ignore: true
+ignore: false
 ---
 
 # Tutorials
@@ -17,7 +17,7 @@ Our tutorials include step-by-step examples of building different types of apps 
 Add user authentication with Streamlit's built-in support for OpenID Connect.
 
 </RefCard>
-
+{/* 
 <RefCard href="/develop/tutorials/chat-and-llm-apps">
 
 <h5>Chat apps and LLMs</h5>
@@ -64,8 +64,8 @@ Build simple apps and walk through examples to learn about Streamlit's core feat
 
 Create multipage apps, navigation, and flows.
 
-</RefCard>
+</RefCard> */}
 
 </TileContainer>
-
-When you're done developing your app, see our [deployment tutorials](/deploy/tutorials), too!
+{/* 
+When you're done developing your app, see our [deployment tutorials](/deploy/tutorials), too! */}

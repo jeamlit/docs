@@ -2,7 +2,7 @@
 title: Use Microsoft Entra to authenticate users
 slug: /develop/tutorials/authentication/microsoft
 description: Learn how to authenticate users with Microsoft Entra
-ignore: true
+ignore: false
 ---
 
 # Use Microsoft Entra to authenticate users
@@ -11,11 +11,12 @@ ignore: true
 
 ## Prerequisites
 
-- This tutorial requires the following Python libraries:
+- This tutorial requires the following Java libraries:
 
   ```text
-  streamlit>=1.42.0
-  Authlib>=1.3.2
+  //DEPS com.google.code.gson:gson:2.10.1
+  //DEPS com.nimbusds:nimbus-jose-jwt:10.7
+  //DEPS org.apache.httpcomponents.client5:httpclient5:5.3.1
   ```
 
 - You should have a clean working directory called `your-repository`.
@@ -29,32 +30,348 @@ Here's a look at what you'll build:
 
 <Collapse title="Complete code" expanded={false}>
 
-`.streamlit/secrets.toml`
+`.env`
 
-```toml
-[auth]
-redirect_uri = "http://localhost:8501/oauth2callback"
-cookie_secret = "xxx"
-client_id = "xxx"
-client_secret = "xxx"
-server_metadata_url = "https://login.microsoftonline.com/consumers/v2.0/.well-known/openid-configuration"
+```bash
+ENTRA_CLIENT_ID=xxx
+ENTRA_CLIENT_SECRET=xxx
+ENTRA_TENANT_ID=xxx
+ENTRA_REDIRECT_URL=http://localhost:8501/auth/callback
 ```
 
-`app.py`
+`AppWithEntra.java`
 
-```python
-import streamlit as st
+```java
+//DEPS com.google.code.gson:gson:2.10.1
+//DEPS com.nimbusds:nimbus-jose-jwt:10.7
+//DEPS org.apache.httpcomponents.client5:httpclient5:5.3.1
 
-def login_screen():
-    st.header("This app is private.")
-    st.subheader("Please log in.")
-    st.button("Log in with Microsoft", on_click=st.login)
 
-if not st.user.is_logged_in:
-    login_screen()
-else:
-    st.header(f"Welcome, {st.user.name}!")
-    st.button("Log out", on_click=st.logout)
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.nimbusds.jwt.SignedJWT;
+import com.nimbusds.jwt.JWTClaimsSet;
+
+
+import java.util.*;
+
+import org.apache.http.HttpEntity;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
+
+import io.javelit.core.Jt;
+
+public class AppWithEntra {
+
+    private static final String SESSION_USER = "current_user";
+    private static final String SESSION_TOKEN = "auth_token";
+    private static final String clientId = System.getenv("ENTRA_CLIENT_ID");
+    private static final String clientSecret = System.getenv("ENTRA_CLIENT_SECRET");
+    private static final String tenantId = System.getenv("ENTRA_TENANT_ID");
+    private static final String redirectUri = System.getenv("ENTRA_REDIRECT_URL");
+    private static final String tokenEndpoint = String.format(
+                "https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantId);
+    private static final String authorizationEndpoint = String.format(
+                "https://login.microsoftonline.com/%s/oauth2/v2.0/authorize", tenantId);
+
+    public static void main(String[] args) throws UnsupportedEncodingException {
+        Jt.title("Welcome to Javelit! \uD83D\uDEA1").use();
+        
+        boolean loggedIn = Jt.sessionState().computeIfAbsentBoolean("logged_in", k -> false);
+
+        if (!loggedIn) {
+            var currentPage = Jt.navigation(Jt.page("/login", () -> {
+                loginPage();
+            }), Jt.page("/auth/callback", () -> {
+                renderCallbackPage();
+                Jt.rerun(true);
+            })).hidden().use();
+            currentPage.run();
+        } else {
+            var currentPage = Jt.navigation(Jt.page("/dashboard", () -> {
+                renderDashboardPage();
+            }), Jt.page("/logout", () -> {
+                Jt.sessionState().clear();
+                Jt.rerun(true);
+            }).title("Logout")).use();
+            currentPage.run();
+        }
+    }
+
+    private static void loginPage() throws UnsupportedEncodingException {
+        Jt.text("Please authenticate with your Microsoft 365 account").use();
+
+        // Generate a state parameter for CSRF protection
+        String state = UUID.randomUUID().toString();
+
+        // Get the authorization URL
+        String authUrl = getAuthorizationUrl(state);
+
+        Jt.pageLink(authUrl, "Login with Microsoft").target("_self").use();
+    }
+
+    private static void renderDashboardPage() {
+        Jt.header("Dashboard").use();
+        UserClaims userClaims = (UserClaims) Jt.sessionState().get(SESSION_USER);
+        Jt.markdown("You are logged in: " + userClaims.getName()).use();
+        userClaims.getRoles().forEach(role -> {
+            Jt.markdown("Role: " + role).use();
+        });
+    }
+
+    public static String getAuthorizationUrl(String state) throws UnsupportedEncodingException {
+        Map<String, String> params = new LinkedHashMap<>();
+        params.put("client_id", clientId);
+        params.put("response_type", "code");
+        params.put("redirect_uri", redirectUri);
+        params.put("scope", "openid profile email Directory.Read.All");
+        params.put("state", state);
+
+        return authorizationEndpoint + "?" + buildQueryString(params);
+    }
+
+    private static String buildQueryString(Map<String, String> params) throws UnsupportedEncodingException {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, String> entry : params.entrySet()) {
+            if (sb.length() > 0) {
+                sb.append("&");
+            }
+            sb.append(URLEncoder.encode(entry.getKey(), "UTF-8"));
+            sb.append("=");
+            sb.append(URLEncoder.encode(entry.getValue(), "UTF-8"));
+        }
+        return sb.toString();
+    }
+
+    private static void renderCallbackPage() {
+
+        Map<String, List<String>> params = Jt.urlQueryParameters();
+
+        // Get the authorization code and state from the query parameters
+        String code = Optional.ofNullable(params.get("code")).map(l -> l.get(0)).orElse(null);
+        String state = Optional.ofNullable(params.get("state")).map(l -> l.get(0)).orElse(null);
+        List<String> error = Optional.ofNullable(params.get("error")).orElse(List.of());
+        List<String> errorDescription = Optional.ofNullable(params.get("error_description")).orElse(List.of());
+        
+        // Check for errors from Microsoft
+        if (!error.isEmpty()) {
+            renderErrorPage(error.get(0),
+                    !errorDescription.isEmpty() ? errorDescription.get(0) : "");
+            return;
+        }
+
+        try {
+            // Process the authorization code and get tokens
+            TokenResponse tokenResponse = getTokenFromAuthCode(code);
+            UserClaims userClaims = parseToken(tokenResponse.getIdToken());
+            // Store user info and tokens in session
+            Jt.sessionState().put(SESSION_USER, userClaims);
+            Jt.sessionState().put(SESSION_TOKEN, tokenResponse.getAccessToken());
+            Jt.sessionState().put("logged_in", true);
+        } catch (SecurityException e) {
+            // State validation failed - potential CSRF attack
+            renderErrorPage("Security Error", "Invalid state parameter - possible CSRF attack");
+        } catch (Exception e) {
+            // Token exchange failed
+            renderErrorPage("Authentication Failed", e.getMessage());
+        }
+    }
+
+    public static TokenResponse getTokenFromAuthCode(String authCode) throws Exception {
+        try (CloseableHttpClient httpClient = HttpClients.createDefault()) {
+            HttpPost httpPost = new HttpPost(tokenEndpoint);
+
+            Map<String, String> params = new LinkedHashMap<>();
+            params.put("client_id", clientId);
+            params.put("client_secret", clientSecret);
+            params.put("code", authCode);
+            params.put("redirect_uri", redirectUri);
+            params.put("grant_type", "authorization_code");
+            params.put("scope", "openid profile email");
+
+            httpPost.setEntity(new StringEntity(buildQueryString(params), StandardCharsets.UTF_8));
+            httpPost.setHeader("Content-Type", "application/x-www-form-urlencoded");
+
+            return httpClient.execute(httpPost, response -> {
+                HttpEntity entity = response.getEntity();
+                String responseBody = EntityUtils.toString(entity);
+                return parseTokenResponse(responseBody);
+            });
+        }
+    }
+
+    private static TokenResponse parseTokenResponse(String responseBody) {
+        JsonObject jsonObject = JsonParser.parseString(responseBody).getAsJsonObject();
+
+        TokenResponse tokenResponse = new TokenResponse();
+        tokenResponse.setAccessToken(jsonObject.get("access_token").getAsString());
+        tokenResponse.setIdToken(jsonObject.get("id_token").getAsString());
+        tokenResponse.setExpiresIn(jsonObject.get("expires_in").getAsInt());
+
+        if (jsonObject.has("refresh_token")) {
+            tokenResponse.setRefreshToken(jsonObject.get("refresh_token").getAsString());
+        }
+
+        return tokenResponse;
+    }
+
+    public static UserClaims parseToken(String token) throws Exception {
+        SignedJWT signedJWT = SignedJWT.parse(token);
+        JWTClaimsSet claimsSet = signedJWT.getJWTClaimsSet();
+
+        UserClaims userClaims = new UserClaims();
+        userClaims.setSubject(claimsSet.getSubject());
+        userClaims.setName((String) claimsSet.getClaim("name"));
+        userClaims.setEmail((String) claimsSet.getClaim("email"));
+        userClaims.setOid((String) claimsSet.getClaim("oid")); // Object ID
+
+        // Extract roles from the token
+        Object rolesClaim = claimsSet.getClaim("roles");
+        if (rolesClaim != null) {
+            if (rolesClaim instanceof List) {
+                userClaims.setRoles((List<String>) rolesClaim);
+            } else {
+                userClaims.setRoles(Collections.singletonList((String) rolesClaim));
+            }
+        } else {
+            userClaims.setRoles(Collections.emptyList());
+        }
+
+        // Parse custom claims if present
+        Object groups = claimsSet.getClaim("groups");
+        if (groups != null) {
+            userClaims.setGroups((List<String>) groups);
+        }
+
+        return userClaims;
+    }
+
+    private static void renderErrorPage(String errorTitle, String errorMessage) {
+
+        var container = Jt.container().key("error").use();
+        Jt.title("Authentication Error").use(container);
+        Jt.header("Authentication Failed").use(container);
+        Jt.text("Error: " + errorTitle).use(container);
+        Jt.text("Details: " + errorMessage).use(container);
+
+        // Retry button
+        if (Jt.button("Try Again").use(container)) {
+            Jt.switchPage("/");
+        }
+    }
+    /**
+     * Model class for token response
+     */
+    public static class TokenResponse {
+        private String accessToken;
+        private String idToken;
+        private String refreshToken;
+        private int expiresIn;
+
+        // Getters and setters
+        public String getAccessToken() {
+            return accessToken;
+        }
+
+        public void setAccessToken(String accessToken) {
+            this.accessToken = accessToken;
+        }
+
+        public String getIdToken() {
+            return idToken;
+        }
+
+        public void setIdToken(String idToken) {
+            this.idToken = idToken;
+        }
+
+        public String getRefreshToken() {
+            return refreshToken;
+        }
+
+        public void setRefreshToken(String refreshToken) {
+            this.refreshToken = refreshToken;
+        }
+
+        public int getExpiresIn() {
+            return expiresIn;
+        }
+
+        public void setExpiresIn(int expiresIn) {
+            this.expiresIn = expiresIn;
+        }
+    }
+
+    public static class UserClaims {
+        private String subject;
+        private String name;
+        private String email;
+        private String oid;
+        private List<String> roles;
+        private List<String> groups;
+
+        // Getters and setters
+        public String getSubject() {
+            return subject;
+        }
+
+        public void setSubject(String subject) {
+            this.subject = subject;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public String getEmail() {
+            return email;
+        }
+
+        public void setEmail(String email) {
+            this.email = email;
+        }
+
+        public String getOid() {
+            return oid;
+        }
+
+        public void setOid(String oid) {
+            this.oid = oid;
+        }
+
+        public List<String> getRoles() {
+            return roles;
+        }
+
+        public void setRoles(List<String> roles) {
+            this.roles = roles;
+        }
+
+        public List<String> getGroups() {
+            return groups;
+        }
+
+        public void setGroups(List<String> groups) {
+            this.groups = groups;
+        }
+
+        public boolean hasRole(String role) {
+            return roles != null && roles.contains(role);
+        }
+    }
+
+}
 ```
 
 </Collapse>
@@ -65,213 +382,107 @@ Within Microsoft Entra ID in Azure, you'll need to register a new application an
 
 ### Register a new application
 
+#### Step 1: Create a New Application Registration
+
 1. Go to [Microsoft Azure](https://portal.azure.com/#home), and sign in to Microsoft.
+1. Navigate to Microsoft Entra ID → App registrations → New registration
+1. Fill in the application details:
+   - Name: Your Dashboard Name (e.g., "Javelit Dashboard")
+   - Supported account types: Choose based on your needs:
+     - "Accounts in this organizational directory only" (single tenant)
+     - "Accounts in any organizational directory" (multi-tenant)
+   - Redirect URI: Select "Web" and enter: https://localhost:8501/auth/callback
+1. Click Register
 
-1. At the top of the page among the services, select "**Microsoft Entra ID**."
+#### Step 2: Generate Client Secret
 
-1. In the left navigation, select "**Manage**" → "**App registrations**."
+2. In your app registration, go to Certificates & secrets → Client secrets
+2. Click New client secret
+2. Add a description (e.g., "Dashboard Auth")
+2. Set expiration (typically 24 months)
+2. Click Add and copy the secret value immediately (you won't see it again)
 
-1. At the top of the screen, select "**New registration**."
+#### Step 3: Configure API Permissions
 
-1. Fill in a name for your application.
+3. Go to API permissions → Add a permission
+3. Select Microsoft Graph
+3. Choose Delegated permissions (for user authentication)
+3. Add these permissions:
+   - profile - Read user profile
+   - email - Read email
+   - openid - Sign in users
+   - Directory.Read.All - To read user/group info
+3. Click Grant admin consent
 
-   The application name will be visible to your users within the authentication flow presented by Microsoft.
+#### Step 4: Configure Application Roles (for Role-Based Access)
 
-1. Under "Supported account types," select "**Personal Microsoft accounts only**."
+4. Go to App roles → Create app role
+4. Create roles for your dashboard:
+   - Display name: "Admin"
+   - Value: admin
+   - Description: "Dashboard Administrator"
+   - Do you want to enable this app role?: Yes
+4. Repeat for other roles (e.g., "Viewer", "Editor", etc.)
 
-1. Under "Redirect URI," select a "**Web**" platform, and enter your app's URL with the pathname `oauth2callback`.
+#### Step 5: Assign Roles to Users
 
-   For example, if you are developing locally, enter `http://localhost:8501/oauth2callback`. If you are using a different port, change `8501` to match your port.
+5. Go to Enterprise applications → Find your app
+5. Select Users and groups → Add user/group
+5. Select users and assign them the appropriate roles
 
-1. At the bottom of the screen, select "**Register**."
+#### Step 6: Collect Your Credentials
 
-   Microsoft will redirect you to your new application, a resource within Azure.
+6. Save these values (you'll need them in your Java code):
 
-### Gather your application's details
+   - Client ID: Application (client) ID
+   - Client Secret: The secret you created
+   - Tenant ID: Directory (tenant) ID
+   - Redirect URI: https://localhost:8501/auth/callback
 
-1. To store your app information to use in later steps, open a text editor, or (even better) create a new item in a password locker.
 
-   Always handle your app secrets securely. Remember to label the values as you paste them so you don't mix them up.
 
-1. Under "Essentials," copy the "Application (client) ID" into your text editor.
-
-   This is your `client_id`.
-
-1. At the top of the page, select "**Endpoints**."
-
-1. Copy the "OpenID Connect metadata document" into your text editor.
-
-   This is your `server_metadata_url`.
-
-1. In the left navigation, select "**Manage**" → "**Certificates & secrets**."
-
-1. Near the top, select "**New client secret**."
-
-1. Enter a description, and select an expiration time.
-
-   The description is only used internally. You will use the generated secret to configure your Streamlit app, so choose a description that helps you remember where you use the secret.
-
-1. At the bottom of the dialog, select "**Add**."
-
-   It may take a few seconds for Azure to generate your secret.
-
-1. Copy the "Value" into your text editor.
-
-   This is your `client_secret`. Microsoft will hide the value after you leave Azure, so ensure that you securely store it somewhere now. If you lose your secret, you'll need to delete it from your configuration and generate a new one.
-
-Your client is ready to accept users.
 
 ## Build the example
 
-To create an app with user authentication, you'll need to configure your secrets and prompt your users to log in. You'll use secrets management to store the information from your client, and then create a simple app that welcomes your user by name after they log in.
 
 ### Configure your secrets
 
-1. In `your_repository`, create a `.streamlit/secrets.toml` file.
+1. In `your_repository`, create a `.env` file.
 
-1. Add `secrets.toml` to your `.gitignore` file.
+1. Add `.env` to your `.gitignore` file.
 
    <Important>
       Never commit secrets to your repository. For more information about `.gitignore`, see [Ignoring files](https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files).
    </Important>
 
-1. Generate a strong, random secret to use as your cookie secret.
 
-   The cookie secret is used to sign each user's identity cookie, which Streamlit stores when they log in.
 
-1. In `.streamlit/secrets.toml`, add your connection configuration:
+1. In `.env`, add your connection configuration:
 
-   ```toml
-    [auth]
-    redirect_uri = "http://localhost:8501/oauth2callback"
-    cookie_secret = "xxx"
-    client_id = "xxx"
-    client_secret = "xxx"
-    server_metadata_url = "https://login.microsoftonline.com/consumers/v2.0/.well-known/openid-configuration"
+   ```bash
+   ENTRA_CLIENT_ID=xxx
+   ENTRA_CLIENT_SECRET=xxx
+   ENTRA_TENANT_ID=xxx
+   ENTRA_REDIRECT_URL=http://localhost:8501/auth/callback
    ```
 
-   Replace the values of `client_id`, `client_secret`, and `server_metadata_url` with the values you copied into your text editor earlier. Replace the value of `cookie_secret` with the random secret you generated in the previous step.
+   Replace the values of `ENTRA_CLIENT_ID`, `ENTRA_CLIENT_SECRET`, and `ENTRA_TENANT_ID` with the values you copied into your text editor earlier. 
 
-1. Save your `secrets.toml` file.
+1. Save your `.env` file.
 
 ### Initialize your app
 
-1. In `your_repository`, create a file named `app.py`.
+1. In `your_repository`, create a file named `AppWithEntra.java`.
 1. In a terminal, change directories to `your_repository`, and start your app:
 
    ```bash
-   streamlit run app.py
+   source .env
+   javelit run -p 8501 AppWithEntra.java
    ```
 
    Your app will be blank because you still need to add code.
 
-1. In `app.py`, write the following:
+1. Copy the content of `AppWithEntra.java` from the [example](https://github.com/javelit/javelit/blob/main/examples/AppWithEntra.java) in the [examples](https://github.com/javelit/javelit/tree/main/examples) directory.
 
-   ```python
-   import streamlit as st
-   ```
 
-1. Save your `app.py` file, and view your running app.
-1. In your app, select "**Always rerun**", or press the "**A**" key.
-
-   Your preview will be blank but will automatically update as you save changes to `app.py`.
-
-1. Return to your code.
-
-### Log the user in and out
-
-1. Define a function that prompts the user to log in:
-
-   ```python
-   def login_screen():
-       st.header("This app is private.")
-       st.subheader("Please log in.")
-       st.button("Log in with Microsoft", on_click=st.login)
-   ```
-
-   This function displays a short message and a button. Streamlit's login command is assigned to the button as a callback.
-
-   <Note>
-      If you don't want to use a callback, you can replace the last line with an equivalent `if` statement:
-      ```diff
-      -  st.button("Log in with Microsoft", on_click=st.login)
-      +  if st.button("Log in with Microsoft"):
-      +     st.login()
-      ```
-   </Note>
-
-1. Conditioned on whether the user is logged in, call your function to prompt the user, or show their information:
-
-   ```python
-   if not st.user.is_logged_in:
-       login_screen()
-   else:
-       st.user
-   ```
-
-   Because `st.user` is a dict-like object in a line by itself, Streamlit magic displays it in your app.
-
-1. Save your `app.py` file, and test your running app.
-
-   In your live preview, when you log in to your app, the login button is replaced with the contents of your identity token. Observe the different values that are available from Microsoft. You can use these values to personalize your app for your users.
-
-1. Return to your code.
-
-1. Replace `st.user` with a personalized greeting:
-
-   ```diff
-   else:
-   -   st.user
-   +   st.header(f"Welcome, {st.user.name}!")
-   ```
-
-1. Add a logout button:
-
-   ```python
-       st.button("Log out", on_click=st.logout)
-   ```
-
-1. Save your `app.py` file and test your running app.
-
-   In your live preview, if you log out of your app, it will return to the login prompt.
-
-## Deploy your app on Community Cloud
-
-When you are ready to deploy your app, you must update your application in Microsoft Azure and your secrets. The following steps describe how to deploy your app on Community Cloud.
-
-1. Add a `requirements.txt` file to your repository with the following lines:
-
-   ```txt
-   streamlit>=1.42.0
-   Authlib>=1.3.2
-   ```
-
-   This ensures that the correct Python dependencies are installed for your deployed app.
-
-1. Save your `requirements.txt` file.
-
-1. Deploy your app, and copy your app's URL into your text editor.
-
-   You'll use your app's URL to update your secrets and application configuration in the following steps. For more information about deploying an app on Community Cloud, see [Deploy your app](/deploy/streamlit-community-cloud/deploy-your-app).
-
-1. In your [app settings](/deploy/streamlit-community-cloud/manage-your-app/app-settings) in Community Cloud, select "**Secrets**."
-
-1. Copy the contents of your local `secrets.toml` file, and paste them into your app settings.
-
-1. Change your `redirect_uri` to reflect your deployed app's URL.
-
-   For example, if your app is `my_streamlit_app.streamlit.io`, your redirect URI would be `https://my_streamlit_app.streamlit.io/oauth2callback`.
-
-1. Save and close your settings.
-
-1. Return to your application in Microsoft Azure.
-
-   If you've closed Microsoft Azure and need to navigate back to your application, go to your Azure portal → Microsoft Entra ID → App registrations, and select it from the list.
-
-1. In the left navigation, select "**Authentication**."
-
-1. Under "Platform configurations" → "Web," add or update a URI to match your new `redirect_uri`.
-
-1. At the bottom of the page, select "**Save**."
-
-1. Open your deployed app, and test it.
+### Open your deployed app, and test it.

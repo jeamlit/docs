@@ -31,6 +31,22 @@ If Javelit is served behind a proxy on a sub-path, for instance `example.com/beh
 If `--base-path` is set and you need to access the app on localhost directly (not behind the proxy) pass the `?ignoreBasePath=true` query parameter.  
 Example: `localhost:8080/?ignoreBasePath=true`.
 In dev mode, the browser automatically opens with `?ignoreBasePath=true`.
+
+Example of Nginx configuration for running Javelit on a subpath:
+
+```nginx
+location /behind/proxy/ {
+            proxy_connect_timeout 7d;
+            proxy_send_timeout 7d;
+            proxy_read_timeout 7d;
+            proxy_http_version 1.1;
+            proxy_set_header X-Forwarded-Prefix behind/proxy;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "Upgrade";
+            proxy_pass http://localhost:8080/;
+   }
+
+```
 </Collapse>
 
 <Collapse title="How can I customize the CSS? How can I use a custom theme? What about dark mode?">
